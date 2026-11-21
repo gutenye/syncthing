@@ -69,9 +69,10 @@ func parseError(err error) error {
 }
 
 type Pattern struct {
-	pattern string
-	match   glob.Glob
-	result  ignoreresult.R
+	pattern       string
+	literalPrefix string
+	match         glob.Glob
+	result        ignoreresult.R
 }
 
 func (p Pattern) String() string {
@@ -88,9 +89,15 @@ func (p Pattern) String() string {
 	return ret
 }
 
-func (p Pattern) allowsSkippingIgnoredDirs() bool {
+func (p Pattern) allowsSkippingIgnoredDirs(file string) bool {
 	if p.result.IsIgnored() {
 		return true
+	}
+	// Keep ancestors and descendants of literal rooted includes traversable.
+	if p.literalPrefix != "" && file != "" {
+		return file != p.literalPrefix &&
+			!strings.HasPrefix(p.literalPrefix, file+"/") &&
+			!strings.HasPrefix(file, p.literalPrefix+"/")
 	}
 	if p.pattern == "" || p.pattern[0] != '/' {
 		return false
@@ -244,7 +251,14 @@ func (m *Matcher) Match(file string) ignoreresult.R {
 	var lowercaseFile string
 	canSkipDir := true
 	for _, pattern := range m.patterns {
-		if canSkipDir && !pattern.allowsSkippingIgnoredDirs() {
+		matchFile := file
+		if pattern.result.IsCaseFolded() {
+			if lowercaseFile == "" {
+				lowercaseFile = strings.ToLower(file)
+			}
+			matchFile = lowercaseFile
+		}
+		if canSkipDir && !pattern.allowsSkippingIgnoredDirs(matchFile) {
 			canSkipDir = false
 		}
 
@@ -252,14 +266,7 @@ func (m *Matcher) Match(file string) ignoreresult.R {
 		if canSkipDir {
 			res = res.WithSkipDir()
 		}
-		if pattern.result.IsCaseFolded() {
-			if lowercaseFile == "" {
-				lowercaseFile = strings.ToLower(file)
-			}
-			if pattern.match.Match(lowercaseFile) {
-				return res
-			}
-		} else if pattern.match.Match(file) {
+		if pattern.match.Match(matchFile) {
 			return res
 		}
 	}
@@ -398,6 +405,10 @@ func parseLine(line string) ([]Pattern, error) {
 
 	var err error
 	if strings.HasPrefix(line, "/") {
+		prefix := strings.TrimSuffix(line[1:], "/**")
+		if !pattern.result.IsIgnored() && strings.Contains(prefix, "/") && !strings.ContainsAny(prefix, "\\*?[]{}") {
+			pattern.literalPrefix = prefix
+		}
 		// Pattern is rooted in the current dir only
 		pattern.match, err = glob.Compile(line[1:], '/')
 		return []Pattern{pattern}, parseError(err)

@@ -997,3 +997,85 @@ func BenchmarkWalk(b *testing.B) {
 		walkDir(testFs, "/", nil, nil, 0)
 	}
 }
+
+func TestRootedIncludeSkipsUnrelatedTrees(t *testing.T) {
+	for _, pattern := range []string{"!/projects/notes", "!/projects/notes/file"} {
+		t.Run(pattern, func(t *testing.T) {
+			filesystem := &recordingWalkFilesystem{Filesystem: fs.NewFilesystem(fs.FilesystemTypeBasic, t.TempDir())}
+			for _, name := range []string{"projects/notes/file", "projects/cache/deep/ignored", "movies/deep/ignored"} {
+				if err := filesystem.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := fs.WriteFile(filesystem, name, []byte("test"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			matcher := ignore.New(filesystem)
+			if err := matcher.Parse(strings.NewReader(pattern+"\n*"), ".stignore"); err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for result := range WalkWithoutHashing(context.Background(), Config{Filesystem: filesystem, Matcher: matcher}) {
+				if result.Err != nil {
+					t.Fatal(result.Err)
+				}
+				if filepath.ToSlash(result.File.Name) == "projects/notes/file" {
+					found = true
+				}
+			}
+			if !found {
+				t.Error("included file was not scanned")
+			}
+			for _, path := range filesystem.visited {
+				if strings.HasPrefix(path, "movies/") || strings.HasPrefix(path, "projects/cache/") {
+					t.Errorf("visited unrelated descendant %q", path)
+				}
+			}
+		})
+	}
+}
+
+type recordingWalkFilesystem struct {
+	fs.Filesystem
+	visited []string
+}
+
+func (f *recordingWalkFilesystem) Walk(root string, fn fs.WalkFunc) error {
+	return f.Filesystem.Walk(root, func(path string, info fs.FileInfo, err error) error {
+		f.visited = append(f.visited, filepath.ToSlash(path))
+		return fn(path, info, err)
+	})
+}
+
+func BenchmarkWalkRootedInclude(b *testing.B) {
+	filesystem := &recordingWalkFilesystem{Filesystem: fs.NewFilesystem(fs.FilesystemTypeFake, rand.String(32))}
+	for i := range 1000 {
+		name := fmt.Sprintf("ignored-%04d/first/second/file", i)
+		if err := filesystem.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+			b.Fatal(err)
+		}
+		if err := fs.WriteFile(filesystem, name, nil, 0o644); err != nil {
+			b.Fatal(err)
+		}
+	}
+	if err := filesystem.MkdirAll("projects/notes", 0o755); err != nil {
+		b.Fatal(err)
+	}
+	if err := fs.WriteFile(filesystem, "projects/notes/file", nil, 0o644); err != nil {
+		b.Fatal(err)
+	}
+	matcher := ignore.New(filesystem)
+	if err := matcher.Parse(strings.NewReader("!/projects/notes/file\n*"), ".stignore"); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		filesystem.visited = filesystem.visited[:0]
+		for result := range WalkWithoutHashing(context.Background(), Config{Filesystem: filesystem, Matcher: matcher}) {
+			if result.Err != nil {
+				b.Fatal(result.Err)
+			}
+		}
+	}
+	b.ReportMetric(float64(len(filesystem.visited)), "entries/op")
+}

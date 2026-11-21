@@ -1099,7 +1099,7 @@ func TestSkipIgnoredDirs(t *testing.T) {
 			t.Error(err)
 		}
 		for _, pat := range pats {
-			if got := pat.allowsSkippingIgnoredDirs(); got != tc.expected {
+			if got := pat.allowsSkippingIgnoredDirs(""); got != tc.expected {
 				t.Errorf(`Pattern "%v": got %v, expected %v`, pat, got, tc.expected)
 			}
 		}
@@ -1601,5 +1601,49 @@ func TestIgnoreThroughSymlink(t *testing.T) {
 	}
 	if pats.Match("afile").IsIgnored() {
 		t.Error("afile should not be ignored")
+	}
+}
+
+func TestRootedIncludePrunesUnrelatedDirectories(t *testing.T) {
+	cases := []struct {
+		name    string
+		rules   string
+		path    string
+		ignored bool
+		skip    bool
+	}{
+		{"unrelated root", "!/projects/notes\n*", "movies", true, true},
+		{"unrelated child", "!/projects/notes\n/projects", "projects/cache", true, true},
+		{"ancestor", "!/projects/notes\n*", "projects", true, false},
+		{"nested ancestor", "!/projects/notes/file\n*", "projects/notes", true, false},
+		{"included directory", "!/projects/notes\n*", "projects/notes", false, false},
+		{"included descendant", "!/projects/notes\n*", "projects/notes/file", false, false},
+		{"root boundary", "!/projects/notes\n*", "projects-other", true, true},
+		{"child boundary", "!/projects/notes\n*", "projects/notes-other", true, true},
+		{"multiple includes", "!/projects/notes\n!/movies/keep\n*", "movies", true, false},
+		{"unrelated to all includes", "!/projects/notes\n!/movies/keep\n*", "cache", true, true},
+		{"earlier unrooted include", "!keep\n!/projects/notes\n*", "movies", true, false},
+		{"nested wildcard", "!/projects/*/file\n*", "movies", true, false},
+		{"escaped pattern", "!/projects/\\[notes\\]/file\n*", "movies", true, false},
+		{"case folded ancestor", "(?i)!/Projects/Notes\n*", "PROJECTS", true, false},
+		{"case folded include", "(?i)!/Projects/Notes\n*", "PROJECTS/NOTES/file", false, false},
+		{"case folded sibling", "(?i)!/Projects/Notes\n*", "PROJECTS/cache", true, true},
+		{"unicode ancestor", "!/pr\u00E9f\u00E8rences/notes\n*", "pr\u00E9f\u00E8rences", true, false},
+		{"unicode sibling", "!/pr\u00E9f\u00E8rences/notes\n*", "pr\u00E9f\u00E8rences/cache", true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			matcher := New(newTestFS())
+			if err := matcher.Parse(strings.NewReader(tc.rules), ".stignore"); err != nil {
+				t.Fatal(err)
+			}
+			result := matcher.Match(nativeUnicodeNorm(tc.path))
+			if result.IsIgnored() != tc.ignored {
+				t.Fatalf("ignored = %v, want %v", result.IsIgnored(), tc.ignored)
+			}
+			if tc.ignored && result.CanSkipDir() != tc.skip {
+				t.Errorf("can skip = %v, want %v", result.CanSkipDir(), tc.skip)
+			}
+		})
 	}
 }
